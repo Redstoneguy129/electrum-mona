@@ -743,7 +743,6 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
             tools_menu.addAction(_("Electrum preferences"), self.settings_dialog)
 
         tools_menu.addAction(_("&Network"), self.gui_object.show_network_dialog).setEnabled(bool(self.network))
-        tools_menu.addAction(_("&Lightning Gossip"), self.gui_object.show_lightning_dialog).setEnabled(bool(self.wallet.has_lightning() and self.network))
         tools_menu.addAction(_("Local &Watchtower"), self.gui_object.show_watchtower_dialog).setEnabled(bool(self.network and self.network.local_watchtower))
         tools_menu.addAction(_("&Plugins"), self.plugins_dialog)
         tools_menu.addSeparator()
@@ -875,17 +874,27 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
         self.payto_e.resolve()
         self.notify_transactions()
 
-    def format_amount(self, x, is_diff=False, whitespaces=False):
-        # x is in sats
-        return self.config.format_amount(x, is_diff=is_diff, whitespaces=whitespaces)
+    def format_amount(self, amount_sat, is_diff=False, whitespaces=False) -> str:
+        """Formats amount as string, converting to desired unit.
+        E.g. 500_000 -> '0.005'
+        """
+        return self.config.format_amount(amount_sat, is_diff=is_diff, whitespaces=whitespaces)
 
-    def format_amount_and_units(self, amount):
-        # amount is in sats
-        text = self.config.format_amount_and_units(amount)
-        x = self.fx.format_amount_and_units(amount) if self.fx else None
-        if text and x:
-            text += ' (%s)'%x
+    def format_amount_and_units(self, amount_sat, *, timestamp: int = None) -> str:
+        """Returns string with both bitcoin and fiat amounts, in desired units.
+        E.g. 500_000 -> '0.005 BTC (191.42 EUR)'
+        """
+        text = self.config.format_amount_and_units(amount_sat)
+        fiat = self.fx.format_amount_and_units(amount_sat, timestamp=timestamp) if self.fx else None
+        if text and fiat:
+            text += f' ({fiat})'
         return text
+
+    def format_fiat_and_units(self, amount_sat) -> str:
+        """Returns string of FX fiat amount, in desired units.
+        E.g. 500_000 -> '191.42 EUR'
+        """
+        return self.fx.format_amount_and_units(amount_sat) if self.fx else ''
 
     def format_fee_rate(self, fee_rate):
         return self.config.format_fee_rate(fee_rate)
@@ -1078,13 +1087,17 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
         def on_expiry(i):
             self.config.set_key('request_expiry', evl_keys[i])
         self.expires_combo.currentIndexChanged.connect(on_expiry)
-        msg = ' '.join([
-            _('Expiration date of your request.'),
+        msg = ''.join([
+            _('Expiration date of your request.'), ' ',
             _('This information is seen by the recipient if you send them a signed payment request.'),
-            _('Expired requests have to be deleted manually from your list, in order to free the corresponding Bitcoin addresses.'),
-            _('The bitcoin address never expires and will always be part of this electrum wallet.'),
+            '\n\n',
+            _('For on-chain requests, the address gets reserved until expiration. After that, it might get reused.'), ' ',
+            _('The bitcoin address never expires and will always be part of this electrum wallet.'), ' ',
+            _('You can reuse a bitcoin address any number of times but it is not good for your privacy.'),
+            '\n\n',
+            _('For Lightning requests, payments will not be accepted after the expiration.'),
         ])
-        grid.addWidget(HelpLabel(_('Expires after'), msg), 2, 0)
+        grid.addWidget(HelpLabel(_('Expires after') + ' (?)', msg), 2, 0)
         grid.addWidget(self.expires_combo, 2, 1)
         self.expires_label = QLineEdit('')
         self.expires_label.setReadOnly(1)
@@ -1785,9 +1798,10 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
 
     def mktx_for_open_channel(self, funding_sat):
         coins = self.get_coins(nonlocal_only=True)
-        make_tx = lambda fee_est: self.wallet.lnworker.mktx_for_open_channel(coins=coins,
-                                                                             funding_sat=funding_sat,
-                                                                             fee_est=fee_est)
+        make_tx = lambda fee_est: self.wallet.lnworker.mktx_for_open_channel(
+            coins=coins,
+            funding_sat=funding_sat,
+            fee_est=fee_est)
         return make_tx
 
     def open_channel(self, connect_str, funding_sat, push_amt):
@@ -1810,11 +1824,12 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
         # read funding_sat from tx; converts '!' to int value
         funding_sat = funding_tx.output_value_for_address(ln_dummy_address())
         def task():
-            return self.wallet.lnworker.open_channel(connect_str=connect_str,
-                                                     funding_tx=funding_tx,
-                                                     funding_sat=funding_sat,
-                                                     push_amt_sat=push_amt,
-                                                     password=password)
+            return self.wallet.lnworker.open_channel(
+                connect_str=connect_str,
+                funding_tx=funding_tx,
+                funding_sat=funding_sat,
+                push_amt_sat=push_amt,
+                password=password)
         def on_success(args):
             chan, funding_tx = args
             n = chan.constraints.funding_txn_minimum_depth
@@ -2252,7 +2267,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
     def update_lightning_icon(self):
         if self.lightning_button is None:
             return
-        if self.network.lngossip is None:
+        if self.network is None or self.network.channel_db is None:
             self.lightning_button.setVisible(False)
             return
 

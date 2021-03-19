@@ -45,6 +45,8 @@ import ipaddress
 from ipaddress import IPv4Address, IPv6Address
 import random
 import secrets
+import functools
+from abc import abstractmethod, ABC
 
 import attr
 import aiohttp
@@ -315,6 +317,7 @@ class DaemonThread(threading.Thread, Logger):
         self.running_lock = threading.Lock()
         self.job_lock = threading.Lock()
         self.jobs = []
+        self.stopped_event = threading.Event()  # set when fully stopped
 
     def add_jobs(self, jobs):
         with self.job_lock:
@@ -355,6 +358,7 @@ class DaemonThread(threading.Thread, Logger):
             jnius.detach()
             self.logger.info("jnius detach")
         self.logger.info("stopped")
+        self.stopped_event.set()
 
 
 def print_stderr(*args):
@@ -696,7 +700,7 @@ def quantize_feerate(fee) -> Union[None, Decimal, int]:
     return Decimal(fee).quantize(_feerate_quanta, rounding=decimal.ROUND_HALF_DOWN)
 
 
-def timestamp_to_datetime(timestamp):
+def timestamp_to_datetime(timestamp: Optional[int]) -> Optional[datetime]:
     if timestamp is None:
         return None
     return datetime.fromtimestamp(timestamp)
@@ -1057,6 +1061,7 @@ def make_dir(path, allow_symlink=True):
 def log_exceptions(func):
     """Decorator to log AND re-raise exceptions."""
     assert asyncio.iscoroutinefunction(func), 'func needs to be a coroutine'
+    @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         self = args[0] if len(args) > 0 else None
         try:
@@ -1076,6 +1081,7 @@ def log_exceptions(func):
 def ignore_exceptions(func):
     """Decorator to silently swallow all exceptions."""
     assert asyncio.iscoroutinefunction(func), 'func needs to be a coroutine'
+    @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
@@ -1131,7 +1137,7 @@ class SilentTaskGroup(TaskGroup):
         return super().spawn(*args, **kwargs)
 
 
-class NetworkJobOnDefaultServer(Logger):
+class NetworkJobOnDefaultServer(Logger, ABC):
     """An abstract base class for a job that runs on the main network
     interface. Every time the main interface changes, the job is
     restarted, and some of its internals are reset.
@@ -1142,9 +1148,15 @@ class NetworkJobOnDefaultServer(Logger):
         self.network = network
         self.interface = None  # type: Interface
         self._restart_lock = asyncio.Lock()
+        # Ensure fairness between NetworkJobs. e.g. if multiple wallets
+        # are open, a large wallet's Synchronizer should not starve the small wallets:
+        self._network_request_semaphore = asyncio.Semaphore(100)
+
         self._reset()
-        asyncio.run_coroutine_threadsafe(self._restart(), network.asyncio_loop)
+        # every time the main interface changes, restart:
         register_callback(self._restart, ['default_server_changed'])
+        # also schedule a one-off restart now, as there might already be a main interface:
+        asyncio.run_coroutine_threadsafe(self._restart(), network.asyncio_loop)
 
     def _reset(self):
         """Initialise fields. Called every time the underlying
@@ -1154,19 +1166,21 @@ class NetworkJobOnDefaultServer(Logger):
 
     async def _start(self, interface: 'Interface'):
         self.interface = interface
-        await interface.taskgroup.spawn(self._start_tasks)
+        await interface.taskgroup.spawn(self._run_tasks(taskgroup=self.taskgroup))
 
-    async def _start_tasks(self):
-        """Start tasks in self.taskgroup. Called every time the underlying
+    @abstractmethod
+    async def _run_tasks(self, *, taskgroup: TaskGroup) -> None:
+        """Start tasks in taskgroup. Called every time the underlying
         server connection changes.
         """
-        raise NotImplementedError()  # implemented by subclasses
+        # If self.taskgroup changed, don't start tasks. This can happen if we have
+        # been restarted *just now*, i.e. after the _run_tasks coroutine object was created.
+        if taskgroup != self.taskgroup:
+            raise asyncio.CancelledError()
 
-    async def stop(self):
-        unregister_callback(self._restart)
-        await self._stop()
-
-    async def _stop(self):
+    async def stop(self, *, full_shutdown: bool = True):
+        if full_shutdown:
+            unregister_callback(self._restart)
         await self.taskgroup.cancel_remaining()
 
     @log_exceptions
@@ -1176,7 +1190,7 @@ class NetworkJobOnDefaultServer(Logger):
             return  # we should get called again soon
 
         async with self._restart_lock:
-            await self._stop()
+            await self.stop(full_shutdown=False)
             self._reset()
             await self._start(interface)
 
@@ -1337,7 +1351,9 @@ def randrange(bound: int) -> int:
 
 
 class CallbackManager:
-        # callbacks set by the GUI
+    # callbacks set by the GUI or any thread
+    # guarantee: the callbacks will always get triggered from the asyncio thread.
+
     def __init__(self):
         self.callback_lock = threading.Lock()
         self.callbacks = defaultdict(list)      # note: needs self.callback_lock
@@ -1355,6 +1371,10 @@ class CallbackManager:
                     callbacks.remove(callback)
 
     def trigger_callback(self, event, *args):
+        """Trigger a callback with given arguments.
+        Can be called from any thread. The callback itself will get scheduled
+        on the event loop.
+        """
         if self.asyncio_loop is None:
             self.asyncio_loop = asyncio.get_event_loop()
             assert self.asyncio_loop.is_running(), "event loop not running"
@@ -1527,3 +1547,24 @@ def test_read_write_permissions(path) -> None:
         raise IOError(e) from e
     if echo != echo2:
         raise IOError('echo sanity-check failed')
+
+
+class nullcontext:
+    """Context manager that does no additional processing.
+    This is a ~backport of contextlib.nullcontext from Python 3.10
+    """
+
+    def __init__(self, enter_result=None):
+        self.enter_result = enter_result
+
+    def __enter__(self):
+        return self.enter_result
+
+    def __exit__(self, *excinfo):
+        pass
+
+    async def __aenter__(self):
+        return self.enter_result
+
+    async def __aexit__(self, *excinfo):
+        pass

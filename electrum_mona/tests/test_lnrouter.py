@@ -83,19 +83,19 @@ class Test_LNRouter(TestCaseForTestnet):
         cdb.add_channel_update({'short_channel_id': bfh('0000000000000005'), 'message_flags': b'\x00', 'channel_flags': b'\x00', 'cltv_expiry_delta': 10, 'htlc_minimum_msat': 250, 'fee_base_msat': 100, 'fee_proportional_millionths': 999, 'chain_hash': BitcoinTestnet.rev_genesis_bytes(), 'timestamp': 0})
         cdb.add_channel_update({'short_channel_id': bfh('0000000000000006'), 'message_flags': b'\x00', 'channel_flags': b'\x00', 'cltv_expiry_delta': 10, 'htlc_minimum_msat': 250, 'fee_base_msat': 100, 'fee_proportional_millionths': 99999999, 'chain_hash': BitcoinTestnet.rev_genesis_bytes(), 'timestamp': 0})
         cdb.add_channel_update({'short_channel_id': bfh('0000000000000006'), 'message_flags': b'\x00', 'channel_flags': b'\x01', 'cltv_expiry_delta': 10, 'htlc_minimum_msat': 250, 'fee_base_msat': 100, 'fee_proportional_millionths': 150, 'chain_hash': BitcoinTestnet.rev_genesis_bytes(), 'timestamp': 0})
-        path = path_finder.find_path_for_payment(b'\x02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', b'\x02eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', 100000)
-        self.assertEqual([PathEdge(node_id=b'\x02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', short_channel_id=bfh('0000000000000003')),
-                          PathEdge(node_id=b'\x02eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', short_channel_id=bfh('0000000000000002')),
+        path = path_finder.find_path_for_payment(
+            nodeA=b'\x02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            nodeB=b'\x02eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+            invoice_amount_msat=100000)
+        self.assertEqual([PathEdge(start_node=b'\x02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', end_node=b'\x02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', short_channel_id=bfh('0000000000000003')),
+                          PathEdge(start_node=b'\x02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', end_node=b'\x02eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', short_channel_id=bfh('0000000000000002')),
                          ], path)
-        start_node = b'\x02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-        route = path_finder.create_route_from_path(path, start_node)
+        route = path_finder.create_route_from_path(path)
         self.assertEqual(b'\x02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', route[0].node_id)
         self.assertEqual(bfh('0000000000000003'),                 route[0].short_channel_id)
 
-        # need to duplicate tear_down here, as we also need to wait for the sql thread to stop
-        self.asyncio_loop.call_soon_threadsafe(self._stop_loop.set_result, 1)
-        self._loop_thread.join(timeout=1)
-        cdb.sql_thread.join(timeout=1)
+        cdb.stop()
+        asyncio.run_coroutine_threadsafe(cdb.stopped_event.wait(), self.asyncio_loop).result()
 
     @needs_test_with_all_chacha20_implementations
     def test_new_onion_packet_legacy(self):

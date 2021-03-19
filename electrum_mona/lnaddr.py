@@ -6,7 +6,7 @@ import time
 from hashlib import sha256
 from binascii import hexlify
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import random
 import bitstring
@@ -16,6 +16,9 @@ from .segwit_addr import bech32_encode, bech32_decode, CHARSET
 from . import constants
 from . import ecc
 from .bitcoin import COIN
+
+if TYPE_CHECKING:
+    from .lnutil import LnFeatures
 
 
 # BOLT #11:
@@ -63,12 +66,12 @@ def unshorten_amount(amount) -> Decimal:
     else:
         return Decimal(amount)
 
+_INT_TO_BINSTR = {a: '0' * (5-len(bin(a)[2:])) + bin(a)[2:] for a in range(32)}
+
 # Bech32 spits out array of 5-bit values.  Shim here.
 def u5_to_bitarray(arr):
-    ret = bitstring.BitArray()
-    for a in arr:
-        ret += bitstring.pack("uint:5", a)
-    return ret
+    b = ''.join(_INT_TO_BINSTR[a] for a in arr)
+    return bitstring.BitArray(bin=b)
 
 def bitarray_to_u5(barr):
     assert barr.len % 5 == 0
@@ -314,6 +317,10 @@ class LnAddr(object):
         if self.amount is None:
             return None
         return int(self.amount * COIN * 1000)
+
+    def get_features(self) -> 'LnFeatures':
+        from .lnutil import LnFeatures
+        return LnFeatures(self.get_tag('9') or 0)
 
     def __str__(self):
         return "LnAddr[{}, amount={}{} tags=[{}]]".format(

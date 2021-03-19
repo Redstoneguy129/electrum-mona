@@ -141,7 +141,8 @@ channels graph and compute payment path locally, instead of using trampoline pay
             if use_gossip:
                 self.window.network.start_gossip()
             else:
-                self.window.network.stop_gossip()
+                self.window.network.run_from_another_thread(
+                    self.window.network.stop_gossip())
             util.trigger_callback('ln_gossip_sync_progress')
             # FIXME: update all wallet windows
             util.trigger_callback('channels_updated', self.wallet)
@@ -215,9 +216,7 @@ Use this if you want your local watchtower to keep running after you close your 
             amounts = [edit.get_amount() for edit in edits]
             self.config.set_base_unit(unit_result)
             nz.setMaximum(self.config.decimal_point)
-            self.window.history_list.update()
-            self.window.request_list.update()
-            self.window.address_list.update()
+            self.window.update_tabs()
             for edit, amount in zip(edits, amounts):
                 edit.setAmount(amount)
             self.window.update_status()

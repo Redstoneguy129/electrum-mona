@@ -103,56 +103,6 @@ if [[ $1 == "stop" ]]; then
     $agent stop || true
 fi
 
-if [[ $1 == "forwarding" ]]; then
-    $bob setconfig lightning_forward_payments true
-    bob_node=$($bob nodeid)
-    channel_id1=$($alice open_channel $bob_node 0.2 --push_amount 0.1)
-    channel_id2=$($carol open_channel $bob_node 0.2 --push_amount 0.1)
-    echo "mining 3 blocks"
-    new_blocks 3
-    sleep 10 # time for channelDB
-    request=$($carol add_lightning_request 0.01 -m "blah" | jq -r ".invoice")
-    $carol setconfig test_fail_malformed_htlc true
-    $alice lnpay $request
-    request2=$($carol add_lightning_request 0.01 -m "blah" | jq -r ".invoice")
-    $carol setconfig test_fail_malformed_htlc false
-    $alice lnpay $request2
-    carol_balance=$($carol list_channels | jq -r '.[0].local_balance')
-    echo "carol balance: $carol_balance"
-    if [[ $carol_balance != 11000000 ]]; then
-        exit 1
-    fi
-    chan1=$($alice list_channels | jq -r ".[0].channel_point")
-    chan2=$($carol list_channels | jq -r ".[0].channel_point")
-    $alice close_channel $chan1
-    $carol close_channel $chan2
-fi
-
-if [[ $1 == "trampoline" ]]; then
-    $alice stop
-    $alice setconfig -o use_gossip False
-    $alice daemon -d
-    $alice load_wallet
-    sleep 1
-    $bob setconfig lightning_forward_payments true
-    bob_node=$($bob nodeid)
-    channel_id1=$($alice open_channel $bob_node 0.2 --push_amount 0.1)
-    channel_id2=$($carol open_channel $bob_node 0.2 --push_amount 0.1)
-    echo "mining 3 blocks"
-    new_blocks 3
-    sleep 10 # time for channelDB
-    request=$($carol add_lightning_request 0.01 -m "blah" | jq -r ".invoice")
-    $alice lnpay --attempts=2 $request
-    carol_balance=$($carol list_channels | jq -r '.[0].local_balance')
-    echo "carol balance: $carol_balance"
-    if [[ $carol_balance != 11000000 ]]; then
-        exit 1
-    fi
-    chan1=$($alice list_channels | jq -r ".[0].channel_point")
-    chan2=$($carol list_channels | jq -r ".[0].channel_point")
-    $alice close_channel $chan1
-    $carol close_channel $chan2
-fi
 
 # alice sends two payments, then broadcast ctx after first payment.
 # thus, bob needs to redeem both to_local and to_remote
@@ -180,6 +130,30 @@ if [[ $1 == "breach" ]]; then
     new_blocks 1
     wait_for_balance bob 0.14
     $bob getbalance
+fi
+
+
+if [[ $1 == "backup" ]]; then
+    wait_for_balance alice 1
+    echo "alice opens channel"
+    bob_node=$($bob nodeid)
+    channel=$($alice open_channel $bob_node 0.15)
+    echo "channel point: $channel"
+    new_blocks 3
+    wait_until_channel_open alice
+    backup=$($alice export_channel_backup $channel)
+    request=$($bob add_lightning_request 0.01 -m "blah" | jq -r ".invoice")
+    echo "alice pays"
+    $alice lnpay $request
+    seed=$($alice getseed)
+    $alice stop
+    sleep 2 # FIXME: we should not have to do that..
+    mv /tmp/alice/regtest/wallets/default_wallet /tmp/alice/regtest/wallets/default_wallet.old
+    $alice -o restore "$seed"
+    $alice daemon -d
+    $alice load_wallet
+    $alice import_channel_backup $backup
+    $alice request_force_close $channel
 fi
 
 

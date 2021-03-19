@@ -252,7 +252,7 @@ class Outpoint(StoredObject):
 
 class HtlcLog(NamedTuple):
     success: bool
-    amount_msat: int
+    amount_msat: int  # amount for receiver (e.g. from invoice)
     route: Optional['LNPaymentRoute'] = None
     preimage: Optional[bytes] = None
     error_bytes: Optional[bytes] = None
@@ -319,11 +319,6 @@ NBLOCK_DEADLINE_AFTER_EXPIRY_FOR_OFFERED_HTLCS = 1
 # the deadline for received HTLCs this node has fulfilled:
 # the deadline after which the channel has to be failed and the HTLC fulfilled on-chain before its cltv_expiry
 NBLOCK_DEADLINE_BEFORE_EXPIRY_FOR_RECEIVED_HTLCS = 480
-
-# the cltv_expiry_delta for channels when we are forwarding payments
-NBLOCK_OUR_CLTV_EXPIRY_DELTA = 960
-OUR_FEE_BASE_MSAT = 1000
-OUR_FEE_PROPORTIONAL_MILLIONTHS = 1
 
 NBLOCK_CLTV_EXPIRY_TOO_FAR_INTO_FUTURE = 28 * 960
 
@@ -953,14 +948,15 @@ class LnFeatures(IntFlag):
     _ln_feature_contexts[OPTION_SUPPORT_LARGE_CHANNEL_OPT] = (LNFC.INIT | LNFC.NODE_ANN)
     _ln_feature_contexts[OPTION_SUPPORT_LARGE_CHANNEL_REQ] = (LNFC.INIT | LNFC.NODE_ANN)
 
-    OPTION_TRAMPOLINE_ROUTING_REQ = 1 << 50
-    OPTION_TRAMPOLINE_ROUTING_OPT = 1 << 51
+    OPTION_TRAMPOLINE_ROUTING_REQ = 1 << 24
+    OPTION_TRAMPOLINE_ROUTING_OPT = 1 << 25
 
-    # We do not set trampoline_routing_opt in invoices, because the spec is not ready.
-    # This ensures that current version of Phoenix can pay us
-    # It also prevents Electrum from using t_tags from future implementations
-    _ln_feature_contexts[OPTION_TRAMPOLINE_ROUTING_REQ] = (LNFC.INIT | LNFC.NODE_ANN) # | LNFC.INVOICE)
-    _ln_feature_contexts[OPTION_TRAMPOLINE_ROUTING_OPT] = (LNFC.INIT | LNFC.NODE_ANN) # | LNFC.INVOICE)
+    _ln_feature_contexts[OPTION_TRAMPOLINE_ROUTING_REQ] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.INVOICE)
+    _ln_feature_contexts[OPTION_TRAMPOLINE_ROUTING_OPT] = (LNFC.INIT | LNFC.NODE_ANN | LNFC.INVOICE)
+
+    # temporary
+    OPTION_TRAMPOLINE_ROUTING_REQ_ECLAIR = 1 << 50
+    OPTION_TRAMPOLINE_ROUTING_OPT_ECLAIR = 1 << 51
 
     def validate_transitive_dependencies(self) -> bool:
         # for all even bit set, set corresponding odd bit:
@@ -1272,6 +1268,18 @@ class ShortChannelID(bytes):
         return ShortChannelID(bh + tpos + oi)
 
     @classmethod
+    def from_str(cls, scid: str) -> 'ShortChannelID':
+        """Parses a formatted scid str, e.g. '643920x356x0'."""
+        components = scid.split("x")
+        if len(components) != 3:
+            raise ValueError(f"failed to parse ShortChannelID: {scid!r}")
+        try:
+            components = [int(x) for x in components]
+        except ValueError:
+            raise ValueError(f"failed to parse ShortChannelID: {scid!r}") from None
+        return ShortChannelID.from_components(*components)
+
+    @classmethod
     def normalize(cls, data: Union[None, str, bytes, 'ShortChannelID']) -> Optional['ShortChannelID']:
         if isinstance(data, ShortChannelID) or data is None:
             return data
@@ -1306,7 +1314,7 @@ def format_short_channel_id(short_channel_id: Optional[bytes]):
 @attr.s(frozen=True)
 class UpdateAddHtlc:
     amount_msat = attr.ib(type=int, kw_only=True)
-    payment_hash = attr.ib(type=bytes, kw_only=True, converter=hex_to_bytes)
+    payment_hash = attr.ib(type=bytes, kw_only=True, converter=hex_to_bytes, repr=lambda val: val.hex())
     cltv_expiry = attr.ib(type=int, kw_only=True)
     timestamp = attr.ib(type=int, kw_only=True)
     htlc_id = attr.ib(type=int, kw_only=True, default=None)
